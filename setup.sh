@@ -1,5 +1,5 @@
 #!/bin/bash
-# Setup script for Ragnarok X Garden Bot
+# Setup script for Ragnarok X Bot (Garden + Boss Farming)
 
 echo "Installing dependencies..."
 echo
@@ -19,10 +19,20 @@ echo "Installing Python packages..."
 pip3 install -r requirements.txt
 
 echo
-echo "Done! Next steps:"
-echo "  1. python3 garden_bot.py calibrate"
-echo "  2. python3 garden_bot.py test"
-echo "  3. python3 garden_bot.py run"
+echo "Done! Quick start:"
+echo
+echo "  Option 1: Terminal UI (recommended)"
+echo "    python3 gui.py"
+echo
+echo "  Option 2: Garden bot only (CLI)"
+echo "    python3 garden_bot.py calibrate"
+echo "    python3 garden_bot.py run"
+echo
+echo "  Boss farming setup:"
+echo "    1. python3 gui.py"
+echo "    2. Press C to calibrate boss positions"
+echo "    3. Check the bosses you want to farm"
+echo "    4. Press S to start"
 echo
 echo "IMPORTANT: Grant these macOS permissions:"
 echo "  - Screen Recording: System Settings > Privacy > Screen Recording > Terminal"

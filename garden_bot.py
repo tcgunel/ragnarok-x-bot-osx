@@ -21,97 +21,33 @@ import pyautogui
 from PIL import Image, ImageEnhance
 import time
 import re
-import subprocess
 import tempfile
 import sys
 import os
 import random
 
+from shared import (
+    find_game_window,
+    get_window_or_exit,
+    load_layout,
+    save_layout,
+    click_at,
+    type_on_numpad,
+    ocr_vision,
+    SCRIPT_DIR,
+    CONFIG_FILE,
+)
+
 # --- Config ---
 
-pyautogui.FAILSAFE = True
-pyautogui.PAUSE = 0.05
-
-SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-
-
-# ═══════════════════════════════════════
-#  Window Detection
-# ═══════════════════════════════════════
-
-def find_game_window():
-    """Auto-detect the Ragnarok X window using CoreGraphics (no permissions needed)."""
-    try:
-        import Quartz
-        windows = Quartz.CGWindowListCopyWindowInfo(
-            Quartz.kCGWindowListOptionOnScreenOnly,
-            Quartz.kCGNullWindowID
-        )
-        for w in windows:
-            owner = w.get("kCGWindowOwnerName", "")
-            if "Ragnarok" in owner or "ragnarok" in owner.lower():
-                bounds = w.get("kCGWindowBounds", {})
-                layer = w.get("kCGWindowLayer", 0)
-                # Skip non-standard windows (menus, overlays)
-                if layer != 0:
-                    continue
-                return {
-                    "x": int(bounds.get("X", 0)),
-                    "y": int(bounds.get("Y", 0)),
-                    "w": int(bounds.get("Width", 0)),
-                    "h": int(bounds.get("Height", 0)),
-                }
-    except ImportError:
-        pass
-
-    # Fallback: try AppleScript (needs Accessibility permission)
-    for name_pattern in ["Ragnarok X", "Ragnarok"]:
-        script = f'''
-        tell application "System Events"
-            set ragProc to first process whose name contains "{name_pattern}"
-            set winPos to position of window 1 of ragProc
-            set winSize to size of window 1 of ragProc
-            set x to item 1 of winPos
-            set y to item 2 of winPos
-            set w to item 1 of winSize
-            set h to item 2 of winSize
-            return (x as text) & "," & (y as text) & "," & (w as text) & "," & (h as text)
-        end tell
-        '''
-        try:
-            result = subprocess.run(
-                ['osascript', '-e', script],
-                capture_output=True, text=True, timeout=5
-            )
-            if result.returncode == 0 and result.stdout.strip():
-                parts = result.stdout.strip().split(",")
-                return {
-                    "x": int(parts[0]),
-                    "y": int(parts[1]),
-                    "w": int(parts[2]),
-                    "h": int(parts[3]),
-                }
-        except Exception:
-            continue
-    return None
-
-
-# ═══════════════════════════════════════
-#  Layout - pixel offsets from window origin
-# ═══════════════════════════════════════
-
-import json
-
-CONFIG_FILE = os.path.join(SCRIPT_DIR, "config.json")
 GARDEN_REF_FILE = os.path.join(SCRIPT_DIR, "garden_ref.png")
 
 # Garden button detection
 GARDEN_PATCH_SIZE = 40    # pixels around garden button to compare
 GARDEN_MATCH_THRESHOLD = 0.85  # similarity threshold (0-1)
 
-# Math expression region: this is auto-detected from the calibrated
-# input_field position (math is always above the input field)
-MATH_ABOVE_INPUT = 25   # pixels above input field (center of search area)
+# Math expression region: auto-detected from calibrated input_field position
+MATH_ABOVE_INPUT = 25   # pixels above input field
 MATH_WIDTH = 120        # width of OCR capture region
 MATH_HEIGHT = 36        # height of OCR capture region
 
@@ -119,19 +55,9 @@ MATH_HEIGHT = 36        # height of OCR capture region
 OK_BELOW_INPUT = 85     # pixels below input field
 
 
-def load_layout():
-    """Load calibrated pixel offsets from config.json."""
-    if not os.path.exists(CONFIG_FILE):
-        return None
-    with open(CONFIG_FILE) as f:
-        return json.load(f)
-
-
-def save_layout(layout):
-    """Save calibrated pixel offsets to config.json."""
-    with open(CONFIG_FILE, "w") as f:
-        json.dump(layout, f, indent=2)
-
+# ═══════════════════════════════════════
+#  Calibration
+# ═══════════════════════════════════════
 
 def calibrate():
     """Quick 4-click calibration while CAPTCHA is visible.
@@ -192,12 +118,13 @@ def calibrate():
     print(f"         Offset: {numpad0_offset}")
     print()
 
-    layout = {
+    layout = load_layout() or {}
+    layout.update({
         "garden_button": list(garden_offset),
         "input_field": list(input_offset),
         "numpad_1": list(numpad1_offset),
         "numpad_0": list(numpad0_offset),
-    }
+    })
     save_layout(layout)
 
     print(f"  Saved to {CONFIG_FILE}")
@@ -218,17 +145,14 @@ def _show_calculated(win, layout):
 
     print(f"    Garden button: offset {tuple(gb)}")
 
-    # Math region
     mx = inp[0] - MATH_WIDTH // 2
     my = inp[1] - MATH_ABOVE_INPUT - MATH_HEIGHT
     print(f"    Math region  : offset ({mx}, {my}) size {MATH_WIDTH}x{MATH_HEIGHT}")
     print(f"    Input field  : offset {tuple(inp)}")
 
-    # OK button
     ok = (inp[0], inp[1] + OK_BELOW_INPUT)
     print(f"    OK button    : offset {ok}")
 
-    # Numpad
     cs = (n0[0] - n1[0]) / 3.0
     rs = (n0[1] - n1[1]) / 1.0
     print(f"    Numpad '1'   : offset {tuple(n1)}")
@@ -244,21 +168,15 @@ def get_positions(win, layout):
     n1 = layout["numpad_1"]
     n0 = layout["numpad_0"]
 
-    # Garden button
     garden_pos = (wx + gb[0], wy + gb[1])
 
-    # Math region (above input field, centered on same X)
     math_x = wx + inp[0] - MATH_WIDTH // 2
     math_y = wy + inp[1] - MATH_ABOVE_INPUT - MATH_HEIGHT
     math_region = (math_x, math_y, MATH_WIDTH, MATH_HEIGHT)
 
-    # Input field
     input_pos = (wx + inp[0], wy + inp[1])
-
-    # OK button (same X as input, below it)
     ok_pos = (wx + inp[0], wy + inp[1] + OK_BELOW_INPUT)
 
-    # Numpad grid
     x1 = wx + n1[0]
     y1 = wy + n1[1]
     x0 = wx + n0[0]
@@ -297,7 +215,7 @@ def get_positions(win, layout):
 def is_garden_visible(positions):
     """Check if the garden button is visible by comparing to the calibration reference."""
     if not os.path.exists(GARDEN_REF_FILE):
-        return True  # No reference saved, assume visible
+        return True
 
     ref = Image.open(GARDEN_REF_FILE)
     gx, gy = positions["garden"]
@@ -305,14 +223,13 @@ def is_garden_visible(positions):
     current = pyautogui.screenshot(region=(int(gx - half), int(gy - half),
                                            GARDEN_PATCH_SIZE, GARDEN_PATCH_SIZE))
 
-    # Compare using normalized pixel similarity
     ref_pixels = list(ref.convert("RGB").getdata())
     cur_pixels = list(current.convert("RGB").getdata())
 
     if len(ref_pixels) != len(cur_pixels):
-        return True  # Size mismatch, assume visible
+        return True
 
-    total = len(ref_pixels) * 3  # R, G, B per pixel
+    total = len(ref_pixels) * 3
     diff_sum = sum(
         abs(r1 - r2) + abs(g1 - g2) + abs(b1 - b2)
         for (r1, g1, b1), (r2, g2, b2) in zip(ref_pixels, cur_pixels)
@@ -341,38 +258,14 @@ def _capture_math_region(positions):
     return pyautogui.screenshot(region=(x, y, w, h)), w, h
 
 
-OCR_HELPER = os.path.join(SCRIPT_DIR, "ocr_helper")
-
-
-def _ocr_vision(image_path):
-    """Run macOS Vision OCR via the compiled Swift helper.
-
-    Returns the recognized text, or empty string on failure.
-    """
-    try:
-        result = subprocess.run(
-            [OCR_HELPER, image_path],
-            capture_output=True, text=True, timeout=5
-        )
-        if result.returncode == 0:
-            return result.stdout.strip()
-    except Exception:
-        pass
-    return ""
-
-
 def _normalize_expression(raw):
-    """Normalize OCR output into a clean math expression.
-
-    Handles common misreads: x/X -> *, t/T -> +, etc.
-    """
+    """Normalize OCR output into a clean math expression."""
     expr = raw.replace(" ", "")
 
     for ch in ["×", "x", "X"]:
         expr = expr.replace(ch, "*")
     expr = expr.replace("÷", "/")
 
-    # Common OCR misreads for operators between digits
     expr = re.sub(r"(\d)[tT](\d)", r"\1+\2", expr)
     expr = re.sub(r"(\d)[lI|](\d)", r"\1-\2", expr)
 
@@ -384,12 +277,10 @@ def _extract_expression(raw):
     """Extract a valid 'digit(s) operator digit(s)' pattern from noisy OCR."""
     normalized = _normalize_expression(raw)
 
-    # Direct match: "4+3", "12-5", etc.
     m = re.match(r"^(\d+)([+\-*/])(\d+)$", normalized)
     if m:
         return normalized
 
-    # Pattern inside garbage: find first valid expression
     m = re.search(r"(\d+)([+\-*/])(\d+)", normalized)
     if m:
         return m.group(0)
@@ -410,12 +301,7 @@ for _a in range(1, 10):
 
 
 def _brute_force_from_digits(all_candidates):
-    """Last resort: if OCR only reads digits (e.g. '17' from '1+7'),
-    try to find the expression by matching against known single-digit math.
-
-    Only works for single-digit operands (which is what this game uses).
-    We look at ALL candidates to find a consensus answer.
-    """
+    """Last resort: try to find the expression by matching against known single-digit math."""
     digit_candidates = []
     for source, raw in all_candidates:
         cleaned = re.sub(r"[^0-9]", "", raw)
@@ -425,18 +311,14 @@ def _brute_force_from_digits(all_candidates):
     if not digit_candidates:
         return None
 
-    # Find the most common 2-digit reading
     from collections import Counter
     most_common = Counter(digit_candidates).most_common(1)[0][0]
 
     matches = _VALID_EXPRESSIONS.get(most_common, [])
     if len(matches) == 1:
-        # Unambiguous: only one expression produces these two digits
         expr, result = matches[0]
         return expr
 
-    # Ambiguous (e.g., "24" could be "2+4" or "2*4" but not "2-4"=negative)
-    # Prefer +, then *, then -
     for preferred_op in ["+", "*", "-"]:
         for expr, result in matches:
             if preferred_op in expr and result >= 0:
@@ -446,34 +328,29 @@ def _brute_force_from_digits(all_candidates):
 
 
 def _ocr_single_shot(shot, w, h):
-    """Run Vision OCR on a screenshot with multiple preprocessing strategies.
-    Returns list of (source, text) candidates.
-    """
+    """Run Vision OCR on a screenshot with multiple preprocessing strategies."""
     candidates = []
 
-    # Try raw screenshot
     with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f:
         shot.save(f.name)
-        text = _ocr_vision(f.name)
+        text = ocr_vision(f.name)
         os.unlink(f.name)
     if text:
         candidates.append(("raw", text))
 
-    # Try 4x scaled up (helps with small text)
     big = shot.resize((w * 4, h * 4), Image.LANCZOS)
     with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f:
         big.save(f.name)
-        text = _ocr_vision(f.name)
+        text = ocr_vision(f.name)
         os.unlink(f.name)
     if text:
         candidates.append(("scaled", text))
 
-    # Try high-contrast version
     gray = big.convert("L")
     enhanced = ImageEnhance.Contrast(gray).enhance(3.0)
     with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f:
         enhanced.save(f.name)
-        text = _ocr_vision(f.name)
+        text = ocr_vision(f.name)
         os.unlink(f.name)
     if text:
         candidates.append(("contrast", text))
@@ -482,13 +359,7 @@ def _ocr_single_shot(shot, w, h):
 
 
 def read_math_expression(positions, debug=False):
-    """OCR the math expression using macOS Vision framework.
-
-    1. Capture math region screenshot
-    2. Run Vision OCR on raw + scaled-up versions
-    3. If no digits found, shift region up/down and retry
-    4. Return first result that parses as valid math
-    """
+    """OCR the math expression using macOS Vision framework."""
     shot, w, h = _capture_math_region(positions)
 
     if debug:
@@ -496,11 +367,8 @@ def read_math_expression(positions, debug=False):
 
     all_candidates = _ocr_single_shot(shot, w, h)
 
-    # Check if any candidate has digits (i.e. we captured the right area)
     has_digits = any(re.search(r"\d", text) for _, text in all_candidates)
 
-    # If no digits found, the capture region missed the math expression.
-    # Try shifting the region up and down by small amounts.
     if not has_digits:
         x, y, rw, rh = positions["math_region"]
         for dy in [-12, -20, 8, 15]:
@@ -516,7 +384,6 @@ def read_math_expression(positions, debug=False):
     if debug:
         print(f"\n    OCR candidates: {all_candidates}")
 
-    # Pick the first candidate that yields a valid expression
     for source, raw in all_candidates:
         expr = _extract_expression(raw)
         if expr:
@@ -524,7 +391,6 @@ def read_math_expression(positions, debug=False):
                 print(f"    Winner: '{raw}' -> '{expr}' (from {source})")
             return expr
 
-    # Fallback: brute-force from digits if operator was lost
     brute = _brute_force_from_digits(all_candidates)
     if brute:
         if debug:
@@ -549,38 +415,6 @@ def solve_expression(raw):
         return int(eval(expr))
     except Exception:
         return None
-
-
-# ═══════════════════════════════════════
-#  Mouse Actions (randomized)
-# ═══════════════════════════════════════
-
-def click_at(x, y, jitter=6):
-    """Click with explicit press-hold-release for reliable registration."""
-    dx = random.randint(-jitter, jitter)
-    dy = random.randint(-jitter, jitter)
-    target_x = int(x + dx)
-    target_y = int(y + dy)
-
-    move_duration = 0.1 + random.random() * 0.25
-    pyautogui.moveTo(target_x, target_y, duration=move_duration)
-
-    # Settle before pressing
-    time.sleep(0.05 + random.random() * 0.08)
-    # Explicit press-hold-release so the game registers the click
-    pyautogui.mouseDown()
-    time.sleep(0.04 + random.random() * 0.06)  # hold 40-100ms
-    pyautogui.mouseUp()
-    # Brief pause after release
-    time.sleep(0.03 + random.random() * 0.05)
-
-
-def type_on_numpad(number, numpad):
-    """Click numpad digits to enter a number."""
-    for ch in str(abs(int(number))):
-        if ch in numpad:
-            click_at(*numpad[ch], jitter=4)
-            time.sleep(0.2 + random.random() * 0.25)
 
 
 # ═══════════════════════════════════════
@@ -613,23 +447,18 @@ def handle_captcha(positions, debug=False):
 
     numpad = positions["numpad"]
 
-    # Tap the input field to open the numpad
     click_at(*positions["input"], jitter=5)
     time.sleep(0.4 + random.random() * 0.3)
 
-    # Clear any existing input
     click_at(*numpad["clear"], jitter=4)
     time.sleep(0.2 + random.random() * 0.2)
 
-    # Type answer on numpad
     type_on_numpad(answer, numpad)
     time.sleep(0.3 + random.random() * 0.3)
 
-    # Click numpad checkmark to confirm input
     click_at(*numpad["confirm"], jitter=4)
     time.sleep(0.4 + random.random() * 0.3)
 
-    # Click OK button to submit the dialog
     click_at(*positions["ok"], jitter=6)
     time.sleep(0.8 + random.random() * 0.5)
 
@@ -639,21 +468,6 @@ def handle_captcha(positions, debug=False):
 # ═══════════════════════════════════════
 #  Main Loop
 # ═══════════════════════════════════════
-
-def get_window_or_exit():
-    """Find game window or exit with error."""
-    win = find_game_window()
-    if not win:
-        print("Could not find Ragnarok X window!")
-        print("Make sure the game is running and visible.")
-        print()
-        print("If auto-detection fails, you can set the window manually:")
-        print('  python garden_bot.py run --window "x,y,w,h"')
-        print('  Example: python garden_bot.py run --window "0,25,1036,772"')
-        sys.exit(1)
-    return win
-
-
 
 def run(interval=3.0, debug=False):
     """Main automation loop: click garden + solve CAPTCHAs."""
@@ -692,7 +506,6 @@ def run(interval=3.0, debug=False):
             cycle += 1
             ts = time.strftime("%H:%M:%S")
 
-            # Re-detect window each cycle (user may have moved it)
             new_win = find_game_window()
             if new_win:
                 win = new_win
@@ -724,6 +537,113 @@ def run(interval=3.0, debug=False):
         print(f"  Stopped after {cycle} cycles")
         print(f"  CAPTCHAs solved: {captchas_solved}")
         print("=" * 44)
+
+
+# ═══════════════════════════════════════
+#  Garden Bot as Background Thread (for TUI)
+# ═══════════════════════════════════════
+
+class GardenBotThread:
+    """Runs garden automation in a background thread with callback-based logging."""
+
+    def __init__(self, interval=3.0, debug=False, log_callback=None):
+        self.interval = interval
+        self.debug = debug
+        self.log = log_callback or (lambda msg: None)
+        self.running = False
+        self.captchas_solved = 0
+        self.cycle = 0
+        self._thread = None
+
+    def start(self):
+        if self.running:
+            return
+        import threading
+        self.running = True
+        self._thread = threading.Thread(target=self._loop, daemon=True)
+        self._thread.start()
+        self.log("Garden bot started")
+
+    def stop(self):
+        self.running = False
+        self.log("Garden bot stopped")
+
+    def _loop(self):
+        layout = load_layout()
+        if not layout or "garden_button" not in layout:
+            self.log("Garden: No calibration found!")
+            self.running = False
+            return
+
+        win = find_game_window()
+        if not win:
+            self.log("Garden: Game window not found!")
+            self.running = False
+            return
+
+        positions = get_positions(win, layout)
+
+        while self.running:
+            try:
+                self.cycle += 1
+
+                new_win = find_game_window()
+                if new_win:
+                    win = new_win
+                    positions = get_positions(win, layout)
+
+                if is_garden_visible(positions):
+                    click_at(*positions["garden"], jitter=8)
+
+                jitter_range = self.interval * 0.3
+                wait = self.interval + random.uniform(-jitter_range, jitter_range)
+                time.sleep(max(1.0, wait))
+
+                if handle_captcha_quiet(positions, self.debug):
+                    self.captchas_solved += 1
+                    self.log(f"Garden CAPTCHA solved (total: {self.captchas_solved})")
+
+                time.sleep(0.3 + random.random() * 0.7)
+
+            except Exception as e:
+                self.log(f"Garden error: {e}")
+                time.sleep(2)
+
+
+def handle_captcha_quiet(positions, debug=False):
+    """CAPTCHA handler that doesn't print to stdout (for TUI mode)."""
+    if not is_dialog_visible(positions):
+        return False
+
+    time.sleep(0.5)
+
+    raw_text = read_math_expression(positions, debug)
+    answer = solve_expression(raw_text)
+    if answer is None:
+        time.sleep(0.8)
+        raw_text = read_math_expression(positions, debug)
+        answer = solve_expression(raw_text)
+        if answer is None:
+            return False
+
+    numpad = positions["numpad"]
+
+    click_at(*positions["input"], jitter=5)
+    time.sleep(0.4 + random.random() * 0.3)
+
+    click_at(*numpad["clear"], jitter=4)
+    time.sleep(0.2 + random.random() * 0.2)
+
+    type_on_numpad(answer, numpad)
+    time.sleep(0.3 + random.random() * 0.3)
+
+    click_at(*numpad["confirm"], jitter=4)
+    time.sleep(0.4 + random.random() * 0.3)
+
+    click_at(*positions["ok"], jitter=6)
+    time.sleep(0.8 + random.random() * 0.5)
+
+    return True
 
 
 # ═══════════════════════════════════════
@@ -821,6 +741,10 @@ def main():
 
     elif cmd == "window":
         show_window_info()
+
+    elif cmd == "calibrate-boss":
+        from shared import calibrate_boss
+        calibrate_boss()
 
     else:
         print(__doc__)
