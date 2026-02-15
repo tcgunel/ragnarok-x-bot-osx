@@ -1,0 +1,25 @@
+# Debug screenshots
+debug_*.png
+
+# Calibration (machine-specific)
+config.json
+garden_ref.png
+
+# Game screenshots
+captcha_window.png
+game_window.png
+
+# Compiled binary (rebuild from source)
+ocr_helper
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# macOS
+.DS_Store
+
+# APK builds
+*.apk
